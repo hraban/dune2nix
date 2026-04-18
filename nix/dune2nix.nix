@@ -14,6 +14,8 @@
       overrideScope ? _: _: { },
     }:
     let
+      # Like lib.attrsets.getAttrs but skip missing names
+      getAttrsSafe = names: a: lib.getAttrs (builtins.filter (n: builtins.hasAttr n a) names) a;
       inherit (self.lib) sexp;
 
       # Creates a non-executable derivation that builds all projects in a
@@ -49,13 +51,22 @@
         extendDrvArgs =
           finalAttrs:
           {
+            name,
             src,
             srcOverrides ? _: _: { },
             duneWorkspace ? src + "/dune-workspace",
 
-            # Conventional flag used by many builders in nixpkgs including Dune.
-            # In Dune, it's used to set `-j` (jobs) flag.
-            enableParallelBuilding ? true,
+            # Create a separate derivation with only the dependencies (target
+            # ‘@pkg-install’).  Caches the built dependencies and only rebuilds
+            # when there's a change in `dune-*` files.  Use with caution: all
+            # dependencies, including ocamlc, must be relocatable.  The ocaml
+            # compiler only became relocatable with 5.5.0.
+            separateDepsDeriv ? false,
+
+            # Concurrency is part of the cache key. If incremental build is
+            # enabled, set concurrency to 2 to make the cache key stable.  2 is
+            # the highest safe parallelization count we could think of.
+            jobs ? if separateDepsDeriv then 2 else "$NIX_BUILD_CORES",
             ...
           }@args:
           let
@@ -256,12 +267,96 @@
             patchedLock = linkFarm lockDir lockFiles;
 
             # Flags used for `dune build` and `runtest`.
-            flags = lib.optionalString enableParallelBuilding "-j $NIX_BUILD_CORES";
+            jobsFlag = "-j ${toString jobs}";
+
+            # Best effort incremental build cache for dependencies. Ideally we'd
+            # want to build each package as an individual derivation, but that's
+            # pretty difficult and this is the compromise we make now, though it
+            # will us pretty far. - shun 2026-03
+            duneDeps = stdenv.mkDerivation (
+              {
+                name = "${finalAttrs.name}-deps";
+
+                patchPhase = ''
+                  runHook prePatch
+
+                  cp -rL ${finalAttrs.passthru.patchedLock} ${finalAttrs.passthru.lockDir}
+
+                  runHook postPatch
+                '';
+
+                # Since we're only building the dependencies, we don't need the
+                # source. _Technically_ we need to collect all the `dune-*` files
+                # in the workspace, but it's quite tedious. We explicitly advise
+                # against dune workspaces and incremental build is best-effort,
+                # so we're skipping on this for now. - shun 2026-04
+                src = lib.fileset.toSource {
+                  root = finalAttrs.src;
+                  fileset = lib.fileset.fileFilter (
+                    file:
+                    lib.elem file.name [
+                      "dune-project"
+                      "dune-workspace"
+                    ]
+                  ) finalAttrs.src;
+                };
+
+                target = "@pkg-install";
+
+                buildPhase = ''
+                  dune build $duneBuildFlags ${jobsFlag} $target
+                '';
+
+                buildInputs = finalAttrs.buildInputs or [ ] ++ [
+                  # Almost every package installs ocaml-compiler, and if you
+                  # don’t provide zstd you get this message during the configure
+                  # phase:
+                  #
+                  #   configure: WARNING: zstd library not found
+                  #   configure: WARNING: compressed compilation artefacts not supported
+                  #
+                  # Might as well just provide it by default.
+                  zstd
+                ];
+
+                installPhase = ''
+                  runHook preInstall
+
+                  cp -r _build $out
+
+                  runHook postInstall
+                '';
+              }
+              // getAttrsSafe [
+                "depsBuildBuild"
+                "depsBuildBuildPropagated"
+                "nativeBuildInputs"
+                "propagatedNativeBuildInputs"
+                "defaultNativeBuildInputs"
+                "depsBuildTarget"
+                "depsBuildTargetPropagated"
+                "depsHostHost"
+                "depsHostHostPropagated"
+                "propagatedBuildInputs"
+                "defaultBuildInputs"
+                "depsTargetTarget"
+                "depsTargetTargetPropagated"
+
+                "context"
+                "duneBuildFlags"
+                "strictDeps"
+              ] finalAttrs
+            );
           in
           {
             strictDeps = true;
             passthru = args.passthru or { } // {
-              inherit patchedLock lockDir lockFiles;
+              inherit
+                patchedLock
+                lockDir
+                lockFiles
+                duneDeps
+                ;
             };
 
             nativeBuildInputs = (args.nativeBuildInputs or [ ]) ++ [
@@ -270,35 +365,28 @@
               writableTmpDirAsHomeHook
             ];
 
-            buildInputs = args.buildInputs or [ ] ++ [
-              # Almost every package installs ocaml-compiler, and if you don’t
-              # provide zstd you get this message during the configure phase:
-              #
-              #   configure: WARNING: zstd library not found
-              #   configure: WARNING: compressed compilation artefacts not supported
-              #
-              # Might as well just provide it by default.
-              zstd
-            ];
+            patchPhase =
+              args.patchPhase or ''
+                runHook prePatch
 
-            patchPhase = ''
-              runHook prePatch
+                ${lib.optionalString (lib.pathExists duneLock) ''
+                  rm -rf ${lockDir}
+                  cp -rL ${patchedLock} ${lockDir}
 
-              ${lib.optionalString (lib.pathExists duneLock) ''
-                rm -rf ${lockDir}
-                cp -rL ${patchedLock} ${lockDir}
-              ''}
+                  ${lib.optionalString separateDepsDeriv
+                    # I'm not sure what exactly but Dune cares about some file
+                    # metadata. Combination of `cp -a` and `chmod -R u+w` seems
+                    # to work. - shun 2026-03
+                    ''
+                      mkdir -p _build
+                      cp -a ${duneDeps}/. _build
+                      chmod -R u+w _build
+                    ''
+                  }
+                ''}
 
-              runHook postPatch
-            '';
-
-            duneBuildFlags = [
-              "--error-reporting=twice"
-              "--always-show-command-line"
-              "--action-stdout-on-success=print"
-              "--action-stderr-on-success=print"
-              "--display=verbose"
-            ];
+                runHook postPatch
+              '';
 
             # The build context. Dune supports "default" and Opam switch context,
             # but I'm not convinced that we should support the latter: if you're
@@ -321,6 +409,10 @@
             # https://dune.readthedocs.io/en/stable/reference/dune-workspace/context.html
             context = args.context or "default";
 
+            # The target to build. It defaults to "_build/${context}", but can
+            # pass [aliases](https://dune.readthedocs.io/en/latest/reference/aliases.html)
+            # like `@pkg-install`.
+            #
             # For some reason, `dune build` and `dune runtest` don't accept the
             # `--context` flag. Instead, you specify the build target directory
             # (`_build/${context}`) -- I _hope_ this works, but I wouldn't be
@@ -335,29 +427,67 @@
             # https://github.com/ocaml/dune/blob/33b6ab730ce2bf0a78aaac116d7e95db6c71c45c/bin/runtest.ml#L29
             target = args.target or "_build/${finalAttrs.context}";
 
-            buildPhase = ''
-              runHook preBuild
+            duneBuildFlags = [
+              "--error-reporting=twice"
+              "--always-show-command-line"
+              "--action-stdout-on-success=print"
+              "--action-stderr-on-success=print"
+              "--display=verbose"
+              # Not 100% sure if this is necessary but the wording in the docs
+              # makes it sound slike it’s an important flag for ensuring
+              # determinism in cache handling.  That’s extremely relevant to
+              # Nix, particularly when using incremental build caching, so let’s
+              # enable it, to be safe.
+              "--wait-for-filesystem-clock"
+            ];
 
-              dune build $duneBuildFlags $target ${flags}
+            buildPhase =
+              args.buildPhase or ''
+                runHook preBuild
 
-              runHook postBuild
+                dune build $duneBuildFlags $target ${jobsFlag}
+
+                runHook postBuild
+              '';
+
+            outputs = [
+              "out"
+              # This will get garbage collected unless it’s explicitly
+              # referenced, but it can be very useful for debugging issues or
+              # reusing cache from other derivations when desired.
+              "build"
+            ];
+
+            preFixupPhases = args.preFixupPhases or [ ] ++ [ "installBuildDirPhase" ];
+            installBuildDirPhase = ''
+              runHook preInstallBuildDir
+
+              for target in $outputs; do
+                if [[ "$target" == build && -d _build && ! -a $build ]]; then
+                  cp -r _build $build
+                fi
+              done
+
+              runHook postInstallBuildDir
             '';
 
-            installPhase = ''
-              runHook preInstall
+            installPhase =
+              args.installPhase or ''
+                runHook preInstall
 
-              dune install --context $context --prefix $out
+                dune install --context $context --prefix $out
 
-              runHook postInstall
-            '';
+                runHook postInstall
+              '';
 
-            checkPhase = ''
-              runHook preCheck
+            checkPhase =
+              args.checkPhase or ''
+                runHook preCheck
 
-              dune runtest $target ${flags}
+                dune runtest $target ${jobsFlag}
 
-              runHook postCheck
-            '';
+                runHook postCheck
+              '';
           };
 
         excludeDrvArgNames = [
@@ -367,6 +497,7 @@
           "context"
           "enableParallelBuilding"
           "srcOverrides"
+          "separateDepsDeriv"
         ];
       };
 

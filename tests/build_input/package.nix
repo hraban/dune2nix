@@ -6,6 +6,7 @@
 
 dune2nix.mkDuneProject {
   src = ./.;
+  separateDepsDeriv = true;
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ gmp ];
 }
