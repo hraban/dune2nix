@@ -301,9 +301,15 @@
                   ) finalAttrs.src;
                 };
 
+                outputs = [
+                  "out"
+                  "cache"
+                ];
+
                 target = "@pkg-install";
 
                 buildPhase = ''
+                  export DUNE_CACHE_ROOT="$cache"
                   dune build $duneBuildFlags ${jobsFlag} $target
                 '';
 
@@ -323,6 +329,7 @@
                   runHook preInstall
 
                   cp -r _build $out
+                  mkdir -p $cache
 
                   runHook postInstall
                 '';
@@ -342,6 +349,7 @@
                 "depsTargetTarget"
                 "depsTargetTargetPropagated"
 
+                "DUNE_CACHE"
                 "context"
                 "duneBuildFlags"
                 "strictDeps"
@@ -359,32 +367,50 @@
                 ;
             };
 
+            # If incremental build is enabled, ocaml-compiler is built by a
+            # separate derivation.
+            buildInputs = args.buildInputs or [ ] ++ lib.optionals (!separateDepsDeriv) [ zstd ];
+
             nativeBuildInputs = (args.nativeBuildInputs or [ ]) ++ [
               dune
               # Dune wants to write in ~/.cache
               writableTmpDirAsHomeHook
             ];
 
+            # Set up the cache in case the program wants to use it.
+            duneConfigureCachePhase = ''
+              runHook preDuneConfigureCache
+
+              export DUNE_CACHE_ROOT="$cache"
+
+              runHook postDuneConfigureCache
+            '';
+
+            prePhases = args.prePhases or [ ] ++ [ "duneConfigureCachePhase" ];
+
             patchPhase =
               args.patchPhase or ''
                 runHook prePatch
 
-                ${lib.optionalString (lib.pathExists duneLock) ''
+              ''
+              + lib.optionalString (lib.pathExists duneLock) (
+                ''
                   rm -rf ${lockDir}
                   cp -rL ${patchedLock} ${lockDir}
 
-                  ${lib.optionalString separateDepsDeriv
-                    # I'm not sure what exactly but Dune cares about some file
-                    # metadata. Combination of `cp -a` and `chmod -R u+w` seems
-                    # to work. - shun 2026-03
-                    ''
-                      mkdir -p _build
-                      cp -a ${duneDeps}/. _build
-                      chmod -R u+w _build
-                      dune internal digest-db check
-                    ''
-                  }
-                ''}
+                ''
+                + lib.optionalString separateDepsDeriv ''
+
+                  # I'm not sure what exactly but Dune cares about some file
+                  # metadata. Combination of `cp -a` and `chmod -R u+w` seems
+                  # to work. - shun 2026-03
+                  cp -a ${duneDeps}/. _build
+                  cp -a ${duneDeps.cache}/. $cache
+                  chmod -R u+w $cache _build
+                  dune internal digest-db check
+                ''
+              )
+              + ''
 
                 runHook postPatch
               '';
@@ -458,19 +484,27 @@
               # referenced, but it can be very useful for debugging issues or
               # reusing cache from other derivations when desired.
               "build"
+              # This is the global build cache, which is related to, but
+              # different from, the build directory.  Same rationale as above.
+              "cache"
             ];
 
-            preFixupPhases = args.preFixupPhases or [ ] ++ [ "installBuildDirPhase" ];
-            installBuildDirPhase = ''
-              runHook preInstallBuildDir
+            preFixupPhases = args.preFixupPhases or [ ] ++ [ "installBuildDirsPhase" ];
+            # Also ensure there is at least some directory in the $cache output,
+            # if specified.
+            installBuildDirsPhase = ''
+              runHook preInstallBuildDirs
 
               for target in $outputs; do
                 if [[ "$target" == build && -d _build && ! -a $build ]]; then
                   cp -r _build $build
                 fi
+                if [[ "$target" == cache ]]; then
+                  mkdir -p $cache
+                fi
               done
 
-              runHook postInstallBuildDir
+              runHook postInstallBuildDirs
             '';
 
             installPhase =
