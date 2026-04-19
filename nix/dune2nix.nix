@@ -434,6 +434,7 @@
               "--action-stdout-on-success=print"
               "--action-stderr-on-success=print"
               "--display=verbose"
+              "--stop-on-first-error"
               # Not 100% sure if this is necessary but the wording in the docs
               # makes it sound slike it’s an important flag for ensuring
               # determinism in cache handling.  That’s extremely relevant to
