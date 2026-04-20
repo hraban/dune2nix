@@ -9,4 +9,7 @@ dune2nix.mkDuneProject {
   separateDepsDeriv = true;
   nativeBuildInputs = [ pkg-config ];
   buildInputs = [ gmp ];
+
+  # DUNE_CACHE = "enabled";
+  DUNE_TRACE = "+cache"; #NOMERGE
 }

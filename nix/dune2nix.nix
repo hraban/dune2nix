@@ -350,6 +350,7 @@
                 "depsTargetTargetPropagated"
 
                 "DUNE_CACHE"
+                "DUNE_TRACE"
                 "context"
                 "duneBuildFlags"
                 "strictDeps"
