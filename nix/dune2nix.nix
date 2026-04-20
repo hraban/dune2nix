@@ -381,6 +381,7 @@
                       mkdir -p _build
                       cp -a ${duneDeps}/. _build
                       chmod -R u+w _build
+                      dune internal digest-db check
                     ''
                   }
                 ''}
