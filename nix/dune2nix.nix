@@ -84,7 +84,8 @@
             # build artifacts from a separate derivation, set concurrency to 2
             # to make the cache key stable.  2 is the highest safe
             # parallelization count we could think of.
-            jobs ? if duneSeparateDeps then 2 else "$NIX_BUILD_CORES",
+	    # NOMERGE
+            jobs ? "$NIX_BUILD_CORES",
             ...
           }@args:
           let
@@ -101,16 +102,6 @@
                 sexp.scalar [ "lock_dir" ] ctx
               else
                 "dune.lock";
-
-            dune' =
-              if finalAttrs.dunePatchCacheAlwaysFresh then
-                builtins.trace "warning: dune2nix dunePatchCacheAlwaysFresh is experimental" (
-                  dune.overrideAttrs (old: {
-                    patches = old.patches or [ ] ++ [ ../dune-cache-always-fresh.patch ];
-                  })
-                )
-              else
-                dune;
 
             duneLock = args.duneLock or (src + "/${lockDir}");
 
@@ -434,7 +425,7 @@
             nativeBuildInputs =
               (args.nativeBuildInputs or [ ])
               ++ [
-                dune'
+                dune
                 # Dune wants to write in ~/.cache
                 writableTmpDirAsHomeHook
               ]
@@ -465,21 +456,15 @@
             duneLoadCache = ''
               runHook preDuneLoacCache
 
+              rm -rf ${lockDir}
             ''
             + lib.optionalString (lib.pathExists duneLock) (
               ''
-                rm -rf ${lockDir}
                 cp -rL ${patchedLock} ${lockDir}
 
               ''
               + lib.optionalString finalAttrs.duneSeparateDeps ''
 
-                # I'm not sure what exactly but Dune cares about some file
-                # metadata. Combination of `cp -a` and `chmod -R u+w` seems
-                # to work. - shun 2026-03
-                cp -a ${finalAttrs.passthru.duneDeps}/_build .
-                cp -a ${finalAttrs.passthru.duneDeps}/cache/. $DUNE_CACHE_ROOT/
-                chmod -R u+w $DUNE_CACHE_ROOT _build
               ''
             )
             + ''
@@ -544,13 +529,11 @@
               # Nix, particularly when using separate dependency derivations, so
               # let’s enable it, to be safe.
               "--wait-for-filesystem-clock"
-            ]
-            ++ lib.optionals finalAttrs.dunePatchCacheAlwaysFresh [ "--cache-always-fresh" ];
+            ];
 
             buildPhase =
               args.buildPhase or ''
                 runHook preBuild
-
                 if [[ -n "''${duneCheckNoCacheMiss-}" ]]; then
                   # Semantics of DUNE_TRACE envvar are a bit complicated: either
                   # comma separated, XOR +/- alternating.
@@ -560,7 +543,40 @@
                     export DUNE_TRACE="''${DUNE_TRACE-}+cache"
                   fi
                 fi
-                dune build $duneBuildFlags $target ${jobsFlag}
+
+                chmod -R u+w dune.lock
+                rm -rf dune.lock
+
+                # NOMERGE
+                pkg_dir=../foo
+                cp -rL ${finalAttrs.passthru.duneDeps}/_build/_private/default/.pkg/. ../foo
+                chmod -R u+w ../foo
+
+                if [[ ! -d "$pkg_dir" ]]; then
+                  >&2 echo "no pkg dir"
+                  exit 1
+                fi
+
+                # findlib search paths
+                OCAMLPATH=""
+                for target in "$pkg_dir"/*/target/lib; do
+                  OCAMLPATH="''${OCAMLPATH:+$OCAMLPATH:}$target"
+                done
+
+                # native stubs
+                CAML_LD_LIBRARY_PATH=""
+                for stubs in "$pkg_dir"/*/target/lib/stublibs; do
+		  echo "$stubs"
+                  CAML_LD_LIBRARY_PATH="''${CAML_LD_LIBRARY_PATH:+$CAML_LD_LIBRARY_PATH:}$stubs"
+                done
+
+                for bin in "$pkg_dir"/*/target/bin; do
+		  PATH="''${bin}:$PATH"
+		done
+
+                export OCAMLPATH CAML_LD_LIBRARY_PATH
+
+                dune build $duneBuildFlags @install $target ${jobsFlag}
 
                 runHook postBuild
               '';
@@ -591,7 +607,9 @@
               args.installPhase or ''
                 runHook preInstall
 
-                dune install --context $context --prefix $out
+		# `dune install` doesn's support package management: github.com/ocaml/dune/issues/14449
+                mkdir -p $out
+                cp -rL _build/install/default/. $out/
 
                 runHook postInstall
               '';
