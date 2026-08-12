@@ -1,6 +1,6 @@
 (lang dune 3.21)
 
-(name bar)
+(name proj_md2mld)
 
 (generate_opam_files false)
 
@@ -16,13 +16,13 @@
 (documentation https://url/to/documentation)
 
 (package
- (name bar)
+ (name proj_md2mld)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
  (ocaml (= 5.5.0)) relocatable
 
-; DEPS
+md2mld ; DEP
 )
  (tags
   ("add topics" "to describe" your project)))

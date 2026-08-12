@@ -1,6 +1,6 @@
 (lang dune 3.21)
 
-(name bar)
+(name proj_adobe_font_metrics)
 
 (generate_opam_files false)
 
@@ -16,13 +16,13 @@
 (documentation https://url/to/documentation)
 
 (package
- (name bar)
+ (name proj_adobe_font_metrics)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
  (ocaml (= 5.5.0)) relocatable
 
-; DEPS
+adobe_font_metrics ; DEP
 )
  (tags
   ("add topics" "to describe" your project)))

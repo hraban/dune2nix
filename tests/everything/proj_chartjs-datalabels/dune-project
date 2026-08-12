@@ -1,6 +1,6 @@
 (lang dune 3.21)
 
-(name bar)
+(name proj_chartjs-datalabels)
 
 (generate_opam_files false)
 
@@ -16,13 +16,13 @@
 (documentation https://url/to/documentation)
 
 (package
- (name bar)
+ (name proj_chartjs-datalabels)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends
  (ocaml (= 5.5.0)) relocatable
 
-; DEPS
+chartjs-datalabels ; DEP
 )
  (tags
   ("add topics" "to describe" your project)))
